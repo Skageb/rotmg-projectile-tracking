@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+skage_sandbox/data/*
+skage_sandbox/results/*
+
 # C extensions
 *.so
 
