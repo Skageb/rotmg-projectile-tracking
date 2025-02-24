@@ -1,0 +1,4 @@
+train: "C:/Users/Knut/OneDrive/Documents/GitHub/rotmg-projectile-tracking/knut_sandbox/dataset_yolo"
+val: "C:/Users/Knut/OneDrive/Documents/GitHub/rotmg-projectile-tracking/knut_sandbox/dataset_yolo"
+nc: 1
+names: ["enemy"]
