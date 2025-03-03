@@ -181,3 +181,4 @@ knut_sandbox/dataset_yolo
 knut_sandbox/whole_images
 knut_sandbox/whole_images_cropped
 knut_sandbox/dataset_yolo_whole
+runs/detect
