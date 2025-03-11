@@ -6,7 +6,7 @@ RESULT_FILE = 'optical_flow/OF_3rd_frame.mp4'
 RESULT_ORIGINAL = 'optical_flow/OF_3rd_frame_original.mp4'
 
 N_FRAMES_SKIP = 0
-INSPECT_FRAMES = False
+INSPECT_FRAMES = True
 
 def gaussian_downsize(frame):
     # Apply Gaussian blur with a 5x5 kernel (adjust kernel size and sigma as needed)
@@ -54,7 +54,7 @@ while(cap.isOpened()):
     raw_frame = frame
 
     diff = cv.absdiff(raw_frame, prev_raw)
-    print('Diff current and previous frame', np.sum(diff))
+    #print('Diff current and previous frame', np.sum(diff))
     if np.sum(diff) < 600000:
         continue
     frame = gaussian_downsize(frame)
@@ -76,9 +76,41 @@ while(cap.isOpened()):
     mask[..., 0] = angle*180 / np.pi / 2
 
     #Sets image value according to normalized 
-    fixed_max = 40
-    normalized_magnitude = np.clip((magnitude / fixed_max)* 255, 0, 255).astype(np.uint8)
-    mask[..., 2] = normalized_magnitude
+    mask[..., 2] = cv.normalize(magnitude, None, 0, 255, cv.NORM_MINMAX)
+
+    count_obj = np.unique(mask[...,0], return_counts=True)
+
+    directions, counts = count_obj
+    
+    most_frequent = directions[np.argmax(counts)]
+   
+
+    background_magnitudes = mask[np.where(mask[..., 0] == most_frequent)][...,2]
+    
+    magnitudes, mcounts = np.unique(background_magnitudes, return_counts=True)
+    
+    most_frequent_mag = magnitudes[np.argmax(mcounts)]
+
+    print(f'Background motion, Angle: {most_frequent}, Magnitude {most_frequent_mag}')
+
+    bg_angle = (most_frequent * 2) * np.pi / 180
+
+    bg_flow_x = most_frequent_mag * np.cos(bg_angle)
+    bg_flow_y = most_frequent_mag * np.sin(bg_angle)
+
+
+    x_mag = np.cos(mask[..., 2])
+    y_mag = np.sin(mask[...,2])
+    angles = mask[...,0]*2
+
+    x_rel = x_mag - bg_flow_x
+    y_rel = y_mag - bg_flow_y
+    angle = np.arctan(y_rel/x_rel)
+    mask[..., 2] = x_rel / np.cos(angle)
+
+    print(f'Background motion, Angle: {most_frequent}, Magnitude {most_frequent_mag}')
+
+
 
     rgb = cv.cvtColor(mask, cv.COLOR_HSV2RGB)
 
