@@ -39,7 +39,7 @@ def fit_straight(history, dt):
     Fit a straight‑line model (constant velocity) to the history.
     We assume the model p(t) = a + b*t, where t = index*dt.
     
-    Returns parameters (a_x, b_x, a_y, b_y) and the sum‐of‐squared error.
+    Returns parameters (a_x, b_x, a_y, b_y) and the sum-of-squared error.
     """
     n = len(history)
     t = np.arange(n) * dt
@@ -72,11 +72,11 @@ def fit_circle(history, dt):
     """
     Fit a circular model to the history.
     
-    First, fit a circle to all the positions (using a least‐squares circle fit).
+    First, fit a circle to all the positions (using a least-squares circle fit).
     Then, compute the angle (theta) of each point relative to the circle center and 
     fit a linear model theta(t) = theta0 + omega*t (with t = index*dt).
     
-    Returns parameters (a, b_center, r, theta0, omega) and the sum‐of‐squared error.
+    Returns parameters (a, b_center, r, theta0, omega) and the sum-of-squared error.
     """
     n = len(history)
     t = np.arange(n) * dt
@@ -100,7 +100,7 @@ def fit_sine(history):
     We assume the model: y = D + A * sin(omega*x + phi),
     where x is taken directly from the positions.
     
-    Returns parameters (D, A, omega, phi) and the sum‐of‐squared error.
+    Returns parameters (D, A, omega, phi) and the sum-of-squared error.
     """
     positions = np.array([p[0] for p in history])
     x_data = positions[:, 0]
