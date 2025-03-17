@@ -1,0 +1,30 @@
+# File: /image-edge-filtering/src/main.py
+
+import cv2
+import os
+import time
+from filters import apply_sobel_filter, apply_canny_filter
+
+def load_image(image_path):
+    image = cv2.imread(image_path)
+    if image is None:
+        raise FileNotFoundError(f"Image not found at {image_path}")
+    return image
+
+def main():
+    image_path = os.path.join('testing_folder', 'test_image.png')
+    image = load_image(image_path)
+
+    filters = {
+        'Sobel': apply_sobel_filter,
+        'Canny': apply_canny_filter
+    }
+
+    for filter_name, filter_function in filters.items():
+        start_time = time.time()
+        processed_image = filter_function(image)
+        processing_time = time.time() - start_time
+        print(f"{filter_name} filter applied in {processing_time:.4f} seconds.")
+
+if __name__ == "__main__":
+    main()
