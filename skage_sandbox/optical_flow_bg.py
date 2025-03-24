@@ -106,7 +106,9 @@ while(cap.isOpened()):
     x_rel = x_mag - bg_flow_x
     y_rel = y_mag - bg_flow_y
     angle = np.arctan(y_rel/x_rel)
+    mask[..., 0] = angle*180 / np.pi / 2
     mask[..., 2] = x_rel / np.cos(angle)
+
 
     print(f'Background motion, Angle: {most_frequent}, Magnitude {most_frequent_mag}')
 
