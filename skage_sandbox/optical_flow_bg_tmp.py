@@ -59,6 +59,7 @@ if MAGNITUDE_HEATMAP:
     ax.set_title('Optical Flow Magnitude Heatmap')
     plt.show(block=False)  # Non-blocking show
 
+
 while cap.isOpened():
     for n in range(N_FRAMES_SKIP+1):  #Skip N frames
         ret, frame = cap.read()
