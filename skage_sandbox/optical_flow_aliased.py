@@ -17,7 +17,7 @@ RESULT_FILE = 'optical_flow/OF_3rd_frame.mp4'
 RESULT_ORIGINAL = 'optical_flow/OF_3rd_frame_original.mp4'
 
 
-N_FRAMES_SKIP = 0
+N_FRAMES_SKIP = 1
 INSPECT_FRAMES = True
 MAGNITUDE_HEATMAP = True
 
@@ -80,7 +80,7 @@ while cap.isOpened():
         print('skipped_frame')
         continue
 
-    print(diff)
+    #print(diff)
     
     frame = gaussian_downsize(frame)
     gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
@@ -119,6 +119,8 @@ while cap.isOpened():
     idx = (hue_rounded == dominant_hue)
     mag_values_in_dom_dir = magnitude[idx]
 
+
+
     # If everything truly is background, you might have all or most pixels in the same direction.
     # We can pick the median magnitude for stability (less sensitive to outliers).
     if len(mag_values_in_dom_dir) == 0:
@@ -126,6 +128,8 @@ while cap.isOpened():
         bg_magnitude = 0.0
     else:
         bg_magnitude = np.median(mag_values_in_dom_dir)
+
+    print(f'Background magnitude: {bg_magnitude}')
 
     # Convert the dominant hue back to radians:
     # dominant_hue in [0..180], so we convert back: hue_degrees = dominant_hue*2
