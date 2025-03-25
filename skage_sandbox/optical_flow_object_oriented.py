@@ -118,6 +118,113 @@ class ProjectileTracker:
         return flow
     
 
+    def __pixel_clustering__(
+        self, residual_flow_x, residual_flow_y, frame_for_drawing,
+        mag_threshold=2.0, size_threshold=10, num_bins=36
+    ):
+        """
+        Returns a list of tuples: (bin_id, (min_x, min_y, max_x, max_y)).
+        We can merge only those that share the same bin_id if desired.
+        """
+        res_magnitude, res_angle = cv.cartToPolar(residual_flow_x, residual_flow_y, angleInDegrees=False)
+        magnitude_mask = (res_magnitude > mag_threshold)
+
+        angle_degs = np.degrees(res_angle)
+        angle_bin = (angle_degs // (360 / num_bins)).astype(np.uint8)
+
+        bounding_boxes = []
+        for b in range(num_bins):
+            mask_b = ((angle_bin == b) & magnitude_mask).astype(np.uint8)
+            if np.count_nonzero(mask_b) == 0:
+                continue
+
+            num_labels, labels_img = cv.connectedComponents(mask_b, connectivity=8)
+            for label_id in range(1, num_labels):
+                coords = np.where(labels_img == label_id)
+                size = len(coords[0])
+                if size < size_threshold:
+                    continue
+
+                min_y, max_y = coords[0].min(), coords[0].max()
+                min_x, max_x = coords[1].min(), coords[1].max()
+
+                # Draw the bounding box on the "frame_for_drawing" if you wish
+                # cv.rectangle(frame_for_drawing, (min_x, min_y), (max_x, max_y), (0,255,0), 2)
+
+                bounding_boxes.append((b, (min_x, min_y, max_x, max_y)))
+
+        return bounding_boxes
+    
+    def __boxes_overlap__(self, boxA, boxB, margin=5):
+        """
+        boxA, boxB: (min_x, min_y, max_x, max_y)
+        Returns True if the boxes overlap (non-zero intersection).
+        """
+        (Ax1, Ay1, Ax2, Ay2) = boxA
+        (Bx1, By1, Bx2, By2) = boxB
+
+        # Check for no-overlap in X or Y
+        if Ax2+margin < Bx1 or Bx2+margin < Ax1:
+            return False
+        if Ay2+margin < By1 or By2+margin < Ay1:
+            return False
+        return True
+
+    def __merge_boxes__(self, boxA, boxB):
+        """
+        Merge two boxes into one bounding box that covers both (the union).
+        """
+        (Ax1, Ay1, Ax2, Ay2) = boxA
+        (Bx1, By1, Bx2, By2) = boxB
+        return (
+            min(Ax1, Bx1),
+            min(Ay1, By1),
+            max(Ax2, Bx2),
+            max(Ay2, By2)
+        )
+
+    def __filter_and_merge_bounding_boxes__(self, bounding_boxes, min_l, max_l):
+        """
+        bounding_boxes: list of (bin_id, (min_x, min_y, max_x, max_y))
+        max_area: bounding boxes with area > max_area are dropped
+        
+        Returns a new list of merged, filtered bounding boxes in the same format:
+        [ (bin_id, (min_x, min_y, max_x, max_y)), ... ]
+        """
+        # 1) Filter out boxes that are too big up-front (optional to do after merging instead)
+        filtered_boxes = []
+        for (b_id, (x1, y1, x2, y2)) in bounding_boxes:
+            w, h = (x2 - x1), (y2 - y1)
+            if min_l <= w <= max_l and min_l <= h <= max_l:
+                filtered_boxes.append((b_id, (x1, y1, x2, y2)))
+
+        # 2) We'll do naive iterative merging of overlapping boxes that share the same bin_id
+        merged = True
+        while merged:
+            merged = False
+            result = []
+            while filtered_boxes:
+                curr_bin, curr_box = filtered_boxes.pop()
+                # Try to find a box in 'result' that overlaps with this one
+                merged_index = None
+                for i, (r_bin, r_box) in enumerate(result):
+                    if r_bin == curr_bin and self.__boxes_overlap__(curr_box, r_box):
+                        # Merge them
+                        new_box = self.__merge_boxes__(curr_box, r_box)
+                        # replace the box in result
+                        result[i] = (r_bin, new_box)
+                        merged = True
+                        merged_index = i
+                        break
+
+                if merged_index is None:
+                    # No overlap found => keep it
+                    result.append((curr_bin, curr_box))
+            filtered_boxes = result
+
+        return filtered_boxes
+    
+
     def __subtract_background__(self, flow):
         """Find dominant background flow direction & magnitude, subtract it from flow."""
         # 1) Convert flow to magnitude/angle
@@ -197,12 +304,28 @@ class ProjectileTracker:
             # Subtract background
             residual_flow_x, residual_flow_y = self.__subtract_background__(flow)
 
+            
+
             # Build residual HSV for display
             res_magnitude, res_angle = cv.cartToPolar(residual_flow_x, residual_flow_y, angleInDegrees=False)
             self.mask[..., 0] = (res_angle * 180 / np.pi / 2).astype(np.uint8)
             self.mask[..., 1] = 255
             self.mask[..., 2] = cv.normalize(res_magnitude, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
             rgb = cv.cvtColor(self.mask, cv.COLOR_HSV2BGR)
+
+            bounding_boxes = self.__pixel_clustering__(
+                residual_flow_x, residual_flow_y,
+                frame_for_drawing=frame,  # draw boxes on the current downscaled color frame
+                mag_threshold=2.0,
+                size_threshold=10,
+                num_bins=36
+            )
+
+            merged_bboxes = self.__filter_and_merge_bounding_boxes__(bounding_boxes, min_l=10, max_l= 30)
+
+            # 3) Draw the final bounding boxes on 'rgb' or 'frame'
+            for (b_id, (x1, y1, x2, y2)) in merged_bboxes:
+                cv.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
             # Show frames if desired
             cv.imshow('Input (Downsized)', frame)
