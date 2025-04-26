@@ -36,7 +36,7 @@ def predict_future(history, num_points=50, dt=0.1):
 
 def fit_straight(history, dt):
     """
-    Fit a straight‑line model (constant velocity) to the history.
+    Fit a straight-line model (constant velocity) to the history.
     We assume the model p(t) = a + b*t, where t = index*dt.
     
     Returns parameters (a_x, b_x, a_y, b_y) and the sum-of-squared error.
