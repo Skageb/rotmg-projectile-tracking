@@ -172,3 +172,14 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+
+
+knut_sandbox/enemy
+knut_sandbox/environment
+knut_sandbox/env_processed
+knut_sandbox/dataset_yolo
+knut_sandbox/whole_images
+knut_sandbox/whole_images_cropped
+knut_sandbox/dataset_yolo_whole
+runs/detect
