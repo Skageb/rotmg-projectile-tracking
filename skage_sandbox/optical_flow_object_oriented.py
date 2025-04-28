@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+
 def gaussian_downsize(frame):
     # Apply Gaussian blur and downsize the image for efficiency and denoising
     blurred_frame = cv.GaussianBlur(frame, (19, 19), 1.2)
@@ -12,12 +13,26 @@ def gaussian_downsize(frame):
     return frame
 
 
+class Projectile:
+    def __init__(self, bbox, bin_id, flow_vector):
+        self.id = None  #Only assign id's to confirmed projectiles.
+        self.bbox = bbox  # (x1, y1, x2, y2)
+        self.bin_id = bin_id  # motion direction bin
+        self.flow_vector = flow_vector  # (vx, vy)
+        self.age = 0    #Number of frames survived.
+        self.missed = 0
+        self.confirmed = False
+        
+
 class ProjectileTracker:
-    def __init__(self):
+    def __init__(self, debugging=False):
         # Configuration flags
         self.CREATE_DEMO_MP4 = True
-        self.INSPECT_FRAMES = True
-        self.MAGNITUDE_HEATMAP = True
+        self.MAGNITUDE_HEATMAP = debugging
+        self.OPTICAL_FLOW_WINDOW = debugging
+        self.debugging = debugging
+
+        self.INSPECT_FRAMES = debugging
 
         self.N_FRAMES_SKIP = 0
 
@@ -35,12 +50,17 @@ class ProjectileTracker:
         self.frame_height = None
         self.prev_gray = None
         self.prev_raw = None
-        self.diff_log = []
+        self.pixel_diff_log = []
 
         # For heatmap visualization
         self.fig = None
         self.ax = None
         self.im = None
+        
+        #Projectile tracking
+        self.projectiles: list[Projectile] = []
+        self.next_projectile_id = 0
+        self.max_missed = 3
 
     def __init_video__(self, video_path):
         """Initialize video capture, read first frame, set up variables."""
@@ -126,6 +146,8 @@ class ProjectileTracker:
         Returns a list of tuples: (bin_id, (min_x, min_y, max_x, max_y)).
         We can merge only those that share the same bin_id if desired.
         """
+        self.num_bins = num_bins
+        
         res_magnitude, res_angle = cv.cartToPolar(residual_flow_x, residual_flow_y, angleInDegrees=False)
         magnitude_mask = (res_magnitude > mag_threshold)
 
@@ -142,16 +164,18 @@ class ProjectileTracker:
             for label_id in range(1, num_labels):
                 coords = np.where(labels_img == label_id)
                 size = len(coords[0])
-                if size < size_threshold:
+                if size < size_threshold:   #Ignore too small BB
                     continue
 
                 min_y, max_y = coords[0].min(), coords[0].max()
                 min_x, max_x = coords[1].min(), coords[1].max()
 
-                # Draw the bounding box on the "frame_for_drawing" if you wish
-                # cv.rectangle(frame_for_drawing, (min_x, min_y), (max_x, max_y), (0,255,0), 2)
 
-                bounding_boxes.append((b, (min_x, min_y, max_x, max_y)))
+                coords_list = list(zip(coords[1], coords[0]))  # (x, y) order
+                bounding_boxes.append((b, (min_x, min_y, max_x, max_y), coords_list))
+
+                #bounding_boxes.append((b, (min_x, min_y, max_x, max_y)))   No segmentation mask
+                
 
         return bounding_boxes
     
@@ -193,10 +217,11 @@ class ProjectileTracker:
         """
         # 1) Filter out boxes that are too big up-front (optional to do after merging instead)
         filtered_boxes = []
-        for (b_id, (x1, y1, x2, y2)) in bounding_boxes:
+        
+        for (b_id, (x1, y1, x2, y2), pixel_coords) in bounding_boxes:
             w, h = (x2 - x1), (y2 - y1)
             if min_l <= w <= max_l and min_l <= h <= max_l:
-                filtered_boxes.append((b_id, (x1, y1, x2, y2)))
+                filtered_boxes.append((b_id, (x1, y1, x2, y2), pixel_coords))
 
         # 2) We'll do naive iterative merging of overlapping boxes that share the same bin_id
         merged = True
@@ -204,25 +229,32 @@ class ProjectileTracker:
             merged = False
             result = []
             while filtered_boxes:
-                curr_bin, curr_box = filtered_boxes.pop()
-                # Try to find a box in 'result' that overlaps with this one
+                curr_bin, curr_box, curr_coords = filtered_boxes.pop()
                 merged_index = None
-                for i, (r_bin, r_box) in enumerate(result):
-                    if r_bin == curr_bin and self.__boxes_overlap__(curr_box, r_box):
-                        # Merge them
+                for i, (r_bin, r_box, r_coords) in enumerate(result):
+                    if self.__bins_are_neighbors__(r_bin, curr_bin) and self.__boxes_overlap__(curr_box, r_box):
+                        # Merge boxes
                         new_box = self.__merge_boxes__(curr_box, r_box)
-                        # replace the box in result
-                        result[i] = (r_bin, new_box)
+                        # Merge pixel coordinates
+                        new_coords = curr_coords + r_coords  # concatenate the two lists
+                        # Replace the merged item in result
+                        result[i] = (r_bin, new_box, new_coords)
                         merged = True
                         merged_index = i
                         break
 
                 if merged_index is None:
-                    # No overlap found => keep it
-                    result.append((curr_bin, curr_box))
+                    # No merge found => keep the current box
+                    result.append((curr_bin, curr_box, curr_coords))
+
             filtered_boxes = result
 
         return filtered_boxes
+    
+    
+    def __bins_are_neighbors__(self, bin1, bin2):
+        diff = abs(bin1 - bin2)
+        return diff <= 1 or diff >= (self.num_bins - 1)
     
 
     def __subtract_background__(self, flow):
@@ -266,6 +298,81 @@ class ProjectileTracker:
             self.im.set_data(magnitude)
             self.ax.set_title('Optical Flow Magnitude Heatmap')
             plt.pause(0.001)
+            
+            
+    def __center__(self, bbox):
+        x1, y1, x2, y2 = bbox
+        return (x1 + x2) / 2, (y1 + y2) / 2
+
+    def __estimate_flow__(self, pixel_coords, flow_x, flow_y):
+        vx_list = []
+        vy_list = []
+        for (x, y) in pixel_coords:
+            vx_list.append(flow_x[y, x])
+            vy_list.append(flow_y[y, x])
+        if vx_list:
+            return np.mean(vx_list), np.mean(vy_list)
+        else:
+            return 0.0, 0.0
+        
+        
+    def __update_projectiles__(self, detections, residual_flow_x, residual_flow_y):
+        predictions = []
+        for projectile in self.projectiles:
+            cx, cy = self.__center__(projectile.bbox)
+            vx, vy = projectile.flow_vector
+            pred_cx = cx + vx
+            pred_cy = cy + vy
+            predictions.append((projectile, (pred_cx, pred_cy)))
+
+        assigned_projectiles = set()
+        assigned_detections = set()
+
+        for i, (bin_id, (x1, y1, x2, y2), pixel_coords) in enumerate(detections):
+            cx_det, cy_det = self.__center__((x1, y1, x2, y2))
+            best_projectile = None
+            best_distance = float('inf')
+
+            for projectile, (pred_cx, pred_cy) in predictions:
+                dist = np.hypot(pred_cx - cx_det, pred_cy - cy_det)
+                bin_diff = min(abs(projectile.bin_id - bin_id), self.num_bins - abs(projectile.bin_id - bin_id))
+
+                if dist < 30 and bin_diff <= 2:
+                    if dist < best_distance:
+                        best_distance = dist
+                        best_projectile:Projectile = projectile
+
+            if best_projectile is not None:
+                # Update existing projectile
+                best_projectile.bbox = (x1, y1, x2, y2)
+                mean_vx, mean_vy = self.__estimate_flow__(pixel_coords, residual_flow_x, residual_flow_y)
+                best_projectile.flow_vector = (mean_vx, mean_vy)
+                best_projectile.bin_id = bin_id
+                best_projectile.age += 1
+                
+                if best_projectile.age >= 3 and not best_projectile.confirmed:
+                    best_projectile.confirmed = True
+                    best_projectile.id = self.next_projectile_id
+                    self.next_projectile_id += 1
+                    
+                best_projectile.missed = 0
+                assigned_projectiles.add(best_projectile)
+                assigned_detections.add(i)
+
+        # Create new tracks for unmatched detections
+        for i, (bin_id, (x1, y1, x2, y2), pixel_coords) in enumerate(detections):
+            if i not in assigned_detections:
+                mean_vx, mean_vy = self.__estimate_flow__(pixel_coords, residual_flow_x, residual_flow_y)
+                new_projectile = Projectile((x1, y1, x2, y2), bin_id, (mean_vx, mean_vy))
+                self.projectiles.append(new_projectile)
+                #self.next_track_id += 1
+
+        # Age and remove tracks that are missed too much
+        for projectile in self.projectiles:
+            if projectile not in assigned_projectiles:
+                projectile.missed += 1
+
+        self.projectiles = [p for p in self.projectiles if p.missed <= self.max_missed]
 
     
     def __track_projectiles__(self):
@@ -279,13 +386,20 @@ class ProjectileTracker:
                 break
 
             # Check difference from previous frame (to maybe skip near-identical frames)
-            diff = np.sum(cv.absdiff(frame, self.prev_raw))
-            self.diff_log.append(diff)
-            if len(self.diff_log) > 10:
-                self.diff_log.pop(0)
+            frame_diff = cv.absdiff(frame, self.prev_raw)
+            max_pixel_diff = np.max(frame_diff)
+            
+            if self.INSPECT_FRAMES:
+                print(f'Diff between current and prior frame: {np.sum(frame_diff)}, Max pixel diff: {max_pixel_diff}')
+            self.pixel_diff_log.append(max_pixel_diff)
+            if len(self.pixel_diff_log) > 10:
+                self.pixel_diff_log.pop(0)
 
-            if diff < np.average(self.diff_log) / 8:
-                print('skipped_frame')
+            if self.INSPECT_FRAMES:
+                print(max_pixel_diff, np.average(self.pixel_diff_log))
+            if max_pixel_diff < np.average(self.pixel_diff_log) / 2:
+                if self.INSPECT_FRAMES:
+                    print('skipped_frame')
                 continue
 
             raw_frame = frame
@@ -304,14 +418,9 @@ class ProjectileTracker:
             # Subtract background
             residual_flow_x, residual_flow_y = self.__subtract_background__(flow)
 
-            
-
-            # Build residual HSV for display
             res_magnitude, res_angle = cv.cartToPolar(residual_flow_x, residual_flow_y, angleInDegrees=False)
-            self.mask[..., 0] = (res_angle * 180 / np.pi / 2).astype(np.uint8)
-            self.mask[..., 1] = 255
-            self.mask[..., 2] = cv.normalize(res_magnitude, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
-            rgb = cv.cvtColor(self.mask, cv.COLOR_HSV2BGR)
+
+            
 
             bounding_boxes = self.__pixel_clustering__(
                 residual_flow_x, residual_flow_y,
@@ -321,19 +430,37 @@ class ProjectileTracker:
                 num_bins=36
             )
 
-            merged_bboxes = self.__filter_and_merge_bounding_boxes__(bounding_boxes, min_l=10, max_l= 30)
+            merged_bboxes = self.__filter_and_merge_bounding_boxes__(bounding_boxes, min_l=0, max_l= 100)
+            
+            self.__update_projectiles__(merged_bboxes, residual_flow_x, residual_flow_y)
+            
+            if self.debugging:
+                #self.__draw_debug_info__(frame, merged_bboxes, res_magnitude)
+                pass
 
-            # 3) Draw the final bounding boxes on 'rgb' or 'frame'
-            for (b_id, (x1, y1, x2, y2)) in merged_bboxes:
-                cv.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
+            self.__draw_projectile_bounding_boxes__(frame, res_magnitude)
+            
             # Show frames if desired
-            cv.imshow('Input (Downsized)', frame)
-            cv.imshow('Residual Flow', rgb)
+            if self.debugging:
+                cv.imshow('Input (Downsized)', frame)
+            
+            else:
+                # Upsample back to original size
+                frame_up = cv.resize(frame, (frame.shape[1] * 2, frame.shape[0] * 2),
+                                    interpolation=cv.INTER_LINEAR)
+                cv.imshow('Input (Upsampled)', frame_up)
+                        
+            
+            if self.OPTICAL_FLOW_WINDOW:
+                self.mask[..., 0] = (res_angle * 180 / np.pi / 2).astype(np.uint8)
+                self.mask[..., 1] = 255
+                self.mask[..., 2] = cv.normalize(res_magnitude, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
+                rgb = cv.cvtColor(self.mask, cv.COLOR_HSV2BGR)
+                cv.imshow('Residual Flow', rgb)
 
-            # Write outputs if needed
 
-            self.__write_results__(rgb, gray)
+                self.__write_results__(rgb, gray)
             
 
             # Update variables for next iteration
@@ -355,6 +482,88 @@ class ProjectileTracker:
                     break
 
         self.__cleanup__()
+        
+    def __draw_projectile_bounding_boxes__(self, frame, res_magnitude):
+        """
+        Draw merged bounding boxes and, if tracking is active, draw Track IDs.
+        
+        Parameters:
+            frame: The frame to draw on
+            merged_bboxes: List of (bin_id, bbox, pixel_coords)
+            debugging: If True, draw extra debug info (bin range, mean mag)
+        """
+        overlay = frame.copy()
+
+        for projectile in self.projectiles:
+            if not projectile.confirmed:
+                continue
+            b_id = projectile.bin_id
+            x1, y1, x2, y2 = projectile.bbox
+            
+            # Draw bounding box
+            cv.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+            if self.debugging:
+                # Draw bin angle range
+                # Draw bin and mean mag as before
+                bin_start_deg = b_id * (360 / self.num_bins)
+                bin_end_deg = (b_id + 1) * (360 / self.num_bins)
+                label_text = f"{int(bin_start_deg)}-{int(bin_end_deg)} Angle"
+
+                roi_magnitude = res_magnitude[y1:y2, x1:x2]
+                mean_magnitude = np.mean(roi_magnitude)
+                mag_text = f"{mean_magnitude:.2f} Magnitude"
+
+                cv.putText(frame, label_text, (x1, min(frame.shape[0]-1, y2+8)),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.2, (0,255,0), 1, cv.LINE_AA)
+
+                cv.putText(frame, mag_text, (x1, min(frame.shape[0]-1, y2+16)),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.2, (0,255,0), 1, cv.LINE_AA)
+                
+        # Now draw the Track IDs separately
+        for projectile in self.projectiles:
+            if not projectile.confirmed:
+                continue
+            x1, y1, x2, y2 = projectile.bbox
+            projectile_text = f'ID {projectile.id}'
+
+            # Optional: background box for text (easier to read)
+            (tw, th), _ = cv.getTextSize(projectile_text, cv.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv.rectangle(frame, (x1, y1-20), (x1+tw, y1-5), (255, 0, 0), cv.FILLED)
+
+            # Draw the ID text
+            cv.putText(frame, projectile_text, (x1, y1-7),
+                    cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv.LINE_AA)
+            
+            
+        
+    def __draw_debug_info__(self, frame, bounding_boxes, res_magnitude):
+        overlay = frame.copy()
+
+        for (b_id, (x1, y1, x2, y2), pixel_coords) in bounding_boxes:
+
+            # Draw segmentation mask: color only the segmented region
+            for (x, y) in pixel_coords:
+                overlay[y, x] = (0, 0, 255)  # Red color
+
+            # Draw bin and mean mag as before
+            bin_start_deg = b_id * (360 / self.num_bins)
+            bin_end_deg = (b_id + 1) * (360 / self.num_bins)
+            label_text = f"{int(bin_start_deg)}A"
+
+            roi_magnitude = res_magnitude[y1:y2, x1:x2]
+            mean_magnitude = np.mean(roi_magnitude)
+            mag_text = f"{mean_magnitude:.2f}M"
+
+            cv.putText(frame, label_text, (x1, max(0, y1-10)),
+                    cv.FONT_HERSHEY_SIMPLEX, 0.2, (0,255,0), 1, cv.LINE_AA)
+
+            cv.putText(frame, mag_text, (x1, min(frame.shape[0]-1, y2+15)),
+                    cv.FONT_HERSHEY_SIMPLEX, 0.2, (0,255,0), 1, cv.LINE_AA)
+
+        # After loop, blend the overlay on top
+        alpha = 0.4  # 40% red
+        frame[:] = cv.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
 
     def __write_results__(self, rgb, gray):
         if self.out_optical is not None:
@@ -377,7 +586,8 @@ class ProjectileTracker:
         cv.destroyAllWindows()
 
     def run_tracker(self, video_path):
-        """Orchestrates the entire process: init and track."""
+        """Orchestrates the entire process: init and track.
+           Set debugging to true if you want additional info on the bounding boxes."""
         self.__init_video__(video_path)
         self.__track_projectiles__()
 
@@ -385,5 +595,6 @@ class ProjectileTracker:
         
         
 if __name__ == '__main__':
-    tracker = ProjectileTracker()
-    tracker.run_tracker('data/movement.mp4')
+    tracker = ProjectileTracker(debugging=False)
+    video_path = "120fps_data/2025-03-26 10-43-07.mp4"
+    tracker.run_tracker(video_path)

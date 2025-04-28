@@ -21,7 +21,7 @@ N_FRAMES_SKIP = 1
 INSPECT_FRAMES = True
 MAGNITUDE_HEATMAP = True
 
-cap = cv.VideoCapture('data/movement.mp4')
+cap = cv.VideoCapture('120fps_data/2025-03-26 10-43-07.mp4')
 ret, first_frame = cap.read()
 
 
