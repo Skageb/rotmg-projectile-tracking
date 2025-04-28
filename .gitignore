@@ -5,6 +5,7 @@ __pycache__/
 
 skage_sandbox/data/*
 skage_sandbox/results/*
+skage_sandbox/optical_flow/*
 
 # C extensions
 *.so

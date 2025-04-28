@@ -129,7 +129,7 @@ while cap.isOpened():
     else:
         bg_magnitude = np.median(mag_values_in_dom_dir)
 
-    print(f'Background magnitude: {bg_magnitude}')
+    #print(f'Background magnitude: {bg_magnitude}')
 
     # Convert the dominant hue back to radians:
     # dominant_hue in [0..180], so we convert back: hue_degrees = dominant_hue*2

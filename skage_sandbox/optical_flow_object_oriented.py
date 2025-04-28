@@ -1,6 +1,7 @@
 import cv2 as cv
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 
 
@@ -37,13 +38,11 @@ class ProjectileTracker:
         self.N_FRAMES_SKIP = 0
 
         # File output settings
-        self.result_file = 'optical_flow/OF_3rd_frame.mp4'
-        self.original_video_file = 'optical_flow/OF_3rd_frame_original.mp4'
+        self.result_folder = 'optical_flow'
 
         # Will be set up later
         self.cap = None
-        self.out_optical = None
-        self.out_original = None
+        self.out_result = None
 
         # Internal tracking variables
         self.frame_width = None
@@ -90,10 +89,16 @@ class ProjectileTracker:
         # Prepare video writers if needed
         if self.CREATE_DEMO_MP4:
             fourcc = cv.VideoWriter_fourcc(*'mp4v')
-            self.out_optical = cv.VideoWriter(self.result_file, fourcc, 5.0,
+            
+            result_path = f'{self.result_folder}/{video_path.split('/')[-1].split('.')[0]}.mp4'
+            result_path = self.__get_versioned_filename__(result_path)
+            self.out_result = cv.VideoWriter(result_path, fourcc, 30.0,
                                               (self.frame_width, self.frame_height))
-            self.out_original = cv.VideoWriter(self.original_video_file, fourcc, 5.0,
-                                               (self.frame_width, self.frame_height))
+            
+            if not self.out_result.isOpened():
+                print("Error: Failed to open video writer!")
+                exit()
+
 
         # Set up heatmap if requested
         if self.MAGNITUDE_HEATMAP:
@@ -137,6 +142,7 @@ class ProjectileTracker:
             )
         return flow
     
+
 
     def __pixel_clustering__(
         self, residual_flow_x, residual_flow_y, frame_for_drawing,
@@ -254,14 +260,66 @@ class ProjectileTracker:
     
     def __bins_are_neighbors__(self, bin1, bin2):
         diff = abs(bin1 - bin2)
-        return diff <= 1 or diff >= (self.num_bins - 1)
+        return diff <= 2 or diff >= (self.num_bins - 2)
+    
+    
+    
     
 
     def __subtract_background__(self, flow):
+        """
+        Improved background subtraction with overlapping angle bins.
+        """
+        
+
+        # 1) Convert flow to magnitude and angle (in degrees)
+        magnitude, angle = cv.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=True)
+        
+        if np.mean(magnitude) <= 1:
+            # If too low mean magnitude the background is not moving, return untouched flow vector.
+            return flow[..., 0], flow[..., 1]
+
+        # 2) Create overlapping bins (every 5 degrees)
+        angle_shifted = (angle + 5) % 360  # Shift by half-bin to center the bins
+        angle_bin = (angle_shifted // 10).astype(np.uint8)  # 0 to 71 bins
+
+        # 3) Find dominant angle bin
+        dominant_bin = np.bincount(angle_bin.flatten()).argmax()
+        dominant_angle_deg = dominant_bin * 10  # Central angle of dominant bin
+
+        # 4) Calculate angular deviation
+        angle_deviation = np.abs(angle - dominant_angle_deg)
+        angle_deviation = np.minimum(angle_deviation, 360 - angle_deviation)
+
+        # 5) Find background pixels
+        background_mask = (angle_deviation <= 10)  # ±5 degrees window
+
+        # 6) Background magnitude profile
+        background_magnitudes = magnitude[background_mask]
+        if len(background_magnitudes) == 0:
+            background_mag_threshold = 0.0
+        else:
+            background_mag_threshold = np.percentile(background_magnitudes, 90)
+
+        # 7) Suppression
+        suppress_mask = (background_mask) & (magnitude <= background_mag_threshold * 1.5)
+
+        # 8) Subtract suppressed flow
+        residual_flow_x = flow[..., 0].copy()
+        residual_flow_y = flow[..., 1].copy()
+
+        residual_flow_x[suppress_mask] = 0
+        residual_flow_y[suppress_mask] = 0
+
+        return residual_flow_x, residual_flow_y
+    
+    def __subtract_background2__(self, flow):
         """Find dominant background flow direction & magnitude, subtract it from flow."""
         # 1) Convert flow to magnitude/angle
         magnitude, angle = cv.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=False)
-
+        
+        print(f'Mean magnitude flow field: {np.mean(magnitude)}')
+        
         # 2) Convert angle to [0..180] range for quick binning (like HSV hue)
         hue_for_binning = angle * 180 / np.pi / 2
         hue_rounded = np.round(hue_for_binning).astype(np.uint8)
@@ -286,8 +344,8 @@ class ProjectileTracker:
         bg_flow_y = bg_magnitude * np.sin(bg_angle_rad)
 
         # 6) Subtract background from original flow
-        residual_flow_x = flow[..., 0] - bg_flow_x
-        residual_flow_y = flow[..., 1] - bg_flow_y
+        residual_flow_x = flow[..., 0]# - bg_flow_x
+        residual_flow_y = flow[..., 1]# - bg_flow_y
 
         return residual_flow_x, residual_flow_y
     
@@ -375,6 +433,49 @@ class ProjectileTracker:
         self.projectiles = [p for p in self.projectiles if p.missed <= self.max_missed]
 
     
+    def __create_center_mask__(self, frame_shape, mask_size_ratio=0.2, anchor_point=None):
+        """
+        Creates a binary mask that ignores a square region centered at `anchor_point`.
+        If anchor_point is None, defaults to center of frame.
+        
+        Parameters:
+        - frame_shape: Shape of the frame (height, width).
+        - mask_size_ratio: Ratio of frame width used for mask side length.
+        - anchor_point: (x, y) tuple specifying center of ignored square region.
+        
+        Returns:
+        - Binary mask with 1s everywhere except a square region of 0s.
+        """
+        height, width = frame_shape[:2]
+        mask = np.ones((height, width), dtype=np.uint8)
+
+        # Size of the ignored region
+        square_length = int(height * mask_size_ratio)  # Equal width and height
+        half_length = square_length // 2
+
+        # Default anchor point is frame center
+        if anchor_point is None:
+            cx, cy = width // 2, height // 2
+        else:
+            cx, cy = anchor_point
+
+        # Ensure anchor point is within frame
+        cx = np.clip(cx, 0, width-1)
+        cy = np.clip(cy, 0, height-1)
+
+        # Compute mask region
+        x1 = max(cx - half_length, 0)
+        x2 = min(cx + half_length, width)
+        y1 = max(cy - half_length, 0)
+        y2 = min(cy + half_length, height)
+
+        mask[y1:y2, x1:x2] = 0
+
+        # Save rectangle coordinates for drawing
+        self.center_mask_coords = (x1, y1, x2, y2)
+
+        return mask.astype(bool)
+    
     def __track_projectiles__(self):
         """Main loop to read frames, compute flow, subtract background, detect projectiles, etc."""
         while self.cap.isOpened():
@@ -397,7 +498,8 @@ class ProjectileTracker:
 
             if self.INSPECT_FRAMES:
                 print(max_pixel_diff, np.average(self.pixel_diff_log))
-            if max_pixel_diff < np.average(self.pixel_diff_log) / 2:
+            #if max_pixel_diff < np.average(self.pixel_diff_log) / 2:
+            if max_pixel_diff < 60:
                 if self.INSPECT_FRAMES:
                     print('skipped_frame')
                 continue
@@ -406,10 +508,17 @@ class ProjectileTracker:
 
             # Downsize and convert current frame
             frame = self.__gaussian_downsize__(frame)
+            
+            self.center_ignore_mask = self.__create_center_mask__(frame.shape, mask_size_ratio=0.19, anchor_point=(297, 177))
+            
             gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
 
             # Compute optical flow
             flow = self.__compute_optical_flow__(self.prev_gray, gray)
+            
+            flow[...,0] = flow[...,0] * self.center_ignore_mask
+            flow[...,1] = flow[...,1] * self.center_ignore_mask
+            
 
             # Compute & visualize magnitude if needed
             magnitude, _ = cv.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=False)
@@ -425,12 +534,12 @@ class ProjectileTracker:
             bounding_boxes = self.__pixel_clustering__(
                 residual_flow_x, residual_flow_y,
                 frame_for_drawing=frame,  # draw boxes on the current downscaled color frame
-                mag_threshold=2.0,
+                mag_threshold=0.5,
                 size_threshold=10,
                 num_bins=36
             )
 
-            merged_bboxes = self.__filter_and_merge_bounding_boxes__(bounding_boxes, min_l=0, max_l= 100)
+            merged_bboxes = self.__filter_and_merge_bounding_boxes__(bounding_boxes, min_l=10, max_l= 100)
             
             self.__update_projectiles__(merged_bboxes, residual_flow_x, residual_flow_y)
             
@@ -441,8 +550,14 @@ class ProjectileTracker:
 
             self.__draw_projectile_bounding_boxes__(frame, res_magnitude)
             
+            ##Draw center ignore mask
+            if self.debugging and hasattr(self, "center_mask_coords"):
+                (x1, y1, x2, y2) = self.center_mask_coords
+                cv.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Blue box
+            
             # Show frames if desired
             if self.debugging:
+                frame_up = frame
                 cv.imshow('Input (Downsized)', frame)
             
             else:
@@ -460,7 +575,7 @@ class ProjectileTracker:
                 cv.imshow('Residual Flow', rgb)
 
 
-                self.__write_results__(rgb, gray)
+            self.__write_results__(frame_up)
             
 
             # Update variables for next iteration
@@ -479,6 +594,7 @@ class ProjectileTracker:
                         exit()
             else:
                 if cv.waitKey(1) & 0xFF == ord('q'):
+                    self.__cleanup__()
                     break
 
         self.__cleanup__()
@@ -496,7 +612,8 @@ class ProjectileTracker:
 
         for projectile in self.projectiles:
             if not projectile.confirmed:
-                continue
+                if not self.debugging:
+                    continue
             b_id = projectile.bin_id
             x1, y1, x2, y2 = projectile.bbox
             
@@ -536,53 +653,42 @@ class ProjectileTracker:
                     cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv.LINE_AA)
             
             
-        
-    def __draw_debug_info__(self, frame, bounding_boxes, res_magnitude):
-        overlay = frame.copy()
 
-        for (b_id, (x1, y1, x2, y2), pixel_coords) in bounding_boxes:
+    def __write_results__(self, frame):
+        print('writing called')
+        if self.out_result is not None and self.out_result.isOpened():
+            if (frame.shape[1], frame.shape[0]) != (self.frame_width, self.frame_height):
+                frame = cv.resize(frame, (self.frame_width, self.frame_height), interpolation=cv.INTER_LINEAR)
+            self.out_result.write(frame)
+            print('written')
+            
+            
+            
+    def __get_versioned_filename__(self, base_path):
+        """
+        Given a base output path (without version number), 
+        returns an available filename by appending _vN if needed.
+        """
+        if not os.path.exists(base_path):
+            return base_path  # No conflict
 
-            # Draw segmentation mask: color only the segmented region
-            for (x, y) in pixel_coords:
-                overlay[y, x] = (0, 0, 255)  # Red color
+        base, ext = os.path.splitext(base_path)
+        version = 1
 
-            # Draw bin and mean mag as before
-            bin_start_deg = b_id * (360 / self.num_bins)
-            bin_end_deg = (b_id + 1) * (360 / self.num_bins)
-            label_text = f"{int(bin_start_deg)}A"
+        while True:
+            new_path = f"{base}_v{version}{ext}"
+            if not os.path.exists(new_path):
+                return new_path
+            version += 1
 
-            roi_magnitude = res_magnitude[y1:y2, x1:x2]
-            mean_magnitude = np.mean(roi_magnitude)
-            mag_text = f"{mean_magnitude:.2f}M"
-
-            cv.putText(frame, label_text, (x1, max(0, y1-10)),
-                    cv.FONT_HERSHEY_SIMPLEX, 0.2, (0,255,0), 1, cv.LINE_AA)
-
-            cv.putText(frame, mag_text, (x1, min(frame.shape[0]-1, y2+15)),
-                    cv.FONT_HERSHEY_SIMPLEX, 0.2, (0,255,0), 1, cv.LINE_AA)
-
-        # After loop, blend the overlay on top
-        alpha = 0.4  # 40% red
-        frame[:] = cv.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
-
-    def __write_results__(self, rgb, gray):
-        if self.out_optical is not None:
-            self.out_optical.write(rgb)
-        if self.out_original is not None:
-            # If you want color, write the raw_frame. If you want grayscale, do gray => BGR
-            # E.g., write the downsize grayscale as color
-            gray_bgr = cv.cvtColor(gray, cv.COLOR_GRAY2BGR)
-            self.out_original.write(gray_bgr)
 
 
     def __cleanup__(self):
         """Release resources and close windows."""
         if self.cap is not None:
             self.cap.release()
-        if self.out_optical is not None:
-            self.out_optical.release()
-        if self.out_original is not None:
-            self.out_original.release()
+        if self.out_result is not None:
+            self.out_result.release()
         cv.destroyAllWindows()
 
     def run_tracker(self, video_path):
@@ -596,5 +702,6 @@ class ProjectileTracker:
         
 if __name__ == '__main__':
     tracker = ProjectileTracker(debugging=False)
-    video_path = "120fps_data/2025-03-26 10-43-07.mp4"
+    video_path = "120fps_data/different_projectiles_and_moving.mp4"
+    #video_path = "120fps_data/standing.mp4"
     tracker.run_tracker(video_path)
