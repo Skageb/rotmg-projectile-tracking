@@ -2,7 +2,7 @@ import math
 import numpy as np
 from scipy.optimize import curve_fit, minimize
 
-def predict_future(time_position_history, future_times=None, num_points=50, sine_amplitude_threshold=1.0):
+def predict_future(time_position_history, future_times=None, num_points=50, sine_amplitude_threshold=1.0, circle_radius_threshold=1000.0):
     """
     Given a history of [time, x, y] points, fit all three models (straight, circle, sine)
     to the history and predict future positions.
@@ -12,6 +12,7 @@ def predict_future(time_position_history, future_times=None, num_points=50, sine
         future_times: List of specific future time points to predict at
         num_points: Number of future points to predict if future_times not provided
         sine_amplitude_threshold: Minimum amplitude for a sine wave model to be selected
+        circle_radius_threshold: Maximum allowed radius for a circle model to be selected
     
     Returns:
         List of [x, y] predicted positions
@@ -57,6 +58,16 @@ def predict_future(time_position_history, future_times=None, num_points=50, sine
         else:
             print(f"Sine model selected with amplitude: {total_amplitude:.2f}")
     
+    # Check if circle model is selected, but has too large a radius
+    if best_model == "circle":
+        a, b_center, r, theta0, omega = circle_params
+        if r > circle_radius_threshold:
+            print(f"Circle model selected but radius ({r:.2f}) exceeds threshold ({circle_radius_threshold}).")
+            print(f"Defaulting to straight line model instead.")
+            best_model = "straight"
+        else:
+            print(f"Circle model selected with radius: {r:.2f}")
+
     print(f"Best model: {best_model}")
     
     if best_model == "straight":
