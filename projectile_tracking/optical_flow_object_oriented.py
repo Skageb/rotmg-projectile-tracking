@@ -33,7 +33,7 @@ class ProjectileTracker:
         self.OPTICAL_FLOW_WINDOW = debugging
         self.debugging = debugging
 
-        self.INSPECT_FRAMES = debugging
+        self.INSPECT_FRAMES = True
 
         self.N_FRAMES_SKIP = 0
 
@@ -263,7 +263,38 @@ class ProjectileTracker:
         return diff <= 2 or diff >= (self.num_bins - 2)
     
     
-    
+    def __identify_background_motion__(self, magnitude, angle, dominant_angle_deg, block_rows=6, block_cols=12):
+        """Estimate background motion magnitude block-wise in dominant direction."""
+        h, w = magnitude.shape
+        block_h = h // block_rows
+        block_w = w // block_cols
+
+        # Compute angular deviation from the dominant background angle
+        angle_deviation = np.abs(angle - dominant_angle_deg)
+        angle_deviation = np.minimum(angle_deviation, 360 - angle_deviation)
+        background_mask = (angle_deviation <= 10)  # ±10° window
+
+        block_maxes = []
+
+        for i in range(0, h, block_h):
+            for j in range(0, w, block_w):
+                y1, y2 = i, min(i + block_h, h)
+                x1, x2 = j, min(j + block_w, w)
+
+                block_mag = magnitude[y1:y2, x1:x2]
+                block_mask = background_mask[y1:y2, x1:x2]
+
+                masked_mag = block_mag[block_mask]
+                if masked_mag.size > 0:
+                    block_max = np.max(masked_mag)
+                    block_maxes.append(block_max)
+
+
+        bg_magnitude = np.mean(sorted(block_maxes))
+        #bg_magnitude_upper_thresh = bg_magnitude + 0.5
+        print(f'Background_motion:   Mean {bg_magnitude}, block_maxes: {block_maxes} ')
+        return  bg_magnitude#, bg_magnitude_upper_thresh
+
     
 
     def __subtract_background__(self, flow):
@@ -277,7 +308,14 @@ class ProjectileTracker:
         
         if np.mean(magnitude) <= 1:
             # If too low mean magnitude the background is not moving, return untouched flow vector.
+            self.background_movement = False
+            self.background_vx = 0
+            self.background_vy = 0
             return flow[..., 0], flow[..., 1]
+            
+        else:
+            self.background_movement = True
+        #print(np.unique_counts(magnitude.astype(np.int16)))
 
         # 2) Create overlapping bins (every 5 degrees)
         angle_shifted = (angle + 5) % 360  # Shift by half-bin to center the bins
@@ -286,7 +324,17 @@ class ProjectileTracker:
         # 3) Find dominant angle bin
         dominant_bin = np.bincount(angle_bin.flatten()).argmax()
         dominant_angle_deg = dominant_bin * 10  # Central angle of dominant bin
+        
+        #Calculate background motion estimate to track projectiles.
+        background_mag = self.__identify_background_motion__(magnitude, angle, dominant_angle_deg)
+        
+        # Convert angle to radians
+        dominant_angle_rad = np.deg2rad(dominant_angle_deg)
 
+        # Convert polar to Cartesian
+        self.background_vx = background_mag * np.cos(dominant_angle_rad)
+        self.background_vy = background_mag * np.sin(dominant_angle_rad)
+    
         # 4) Calculate angular deviation
         angle_deviation = np.abs(angle - dominant_angle_deg)
         angle_deviation = np.minimum(angle_deviation, 360 - angle_deviation)
@@ -295,7 +343,9 @@ class ProjectileTracker:
         background_mask = (angle_deviation <= 10)  # ±5 degrees window
 
         # 6) Background magnitude profile
-        background_magnitudes = magnitude[background_mask]
+        background_magnitudes = magnitude[background_mask]  
+        
+        print(np.unique_counts(background_magnitudes.astype(np.uint16)))
         if len(background_magnitudes) == 0:
             background_mag_threshold = 0.0
         else:
@@ -310,42 +360,6 @@ class ProjectileTracker:
 
         residual_flow_x[suppress_mask] = 0
         residual_flow_y[suppress_mask] = 0
-
-        return residual_flow_x, residual_flow_y
-    
-    def __subtract_background2__(self, flow):
-        """Find dominant background flow direction & magnitude, subtract it from flow."""
-        # 1) Convert flow to magnitude/angle
-        magnitude, angle = cv.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=False)
-        
-        print(f'Mean magnitude flow field: {np.mean(magnitude)}')
-        
-        # 2) Convert angle to [0..180] range for quick binning (like HSV hue)
-        hue_for_binning = angle * 180 / np.pi / 2
-        hue_rounded = np.round(hue_for_binning).astype(np.uint8)
-
-        # 3) Find the most frequent direction (dominant hue)
-        directions, dir_counts = np.unique(hue_rounded, return_counts=True)
-        dominant_hue = directions[np.argmax(dir_counts)]
-
-        # 4) Among those pixels in that hue, find the median magnitude
-        idx = (hue_rounded == dominant_hue)
-        mag_values_in_dom_dir = magnitude[idx]
-        if len(mag_values_in_dom_dir) == 0:
-            bg_magnitude = 0.0
-        else:
-            bg_magnitude = np.median(mag_values_in_dom_dir)
-
-        # 5) Convert hue back to radians
-        bg_angle_degs = dominant_hue * 2.0
-        bg_angle_rad = (bg_angle_degs * np.pi) / 180.0
-
-        bg_flow_x = bg_magnitude * np.cos(bg_angle_rad)
-        bg_flow_y = bg_magnitude * np.sin(bg_angle_rad)
-
-        # 6) Subtract background from original flow
-        residual_flow_x = flow[..., 0]# - bg_flow_x
-        residual_flow_y = flow[..., 1]# - bg_flow_y
 
         return residual_flow_x, residual_flow_y
     
@@ -392,7 +406,10 @@ class ProjectileTracker:
             best_distance = float('inf')
 
             for projectile, (pred_cx, pred_cy) in predictions:
-                dist = np.hypot(pred_cx - cx_det, pred_cy - cy_det)
+                if self.background_movement:
+                    dist = np.hypot(pred_cx - cx_det + self.background_vx, pred_cy - cy_det + self.background_vy)
+                else:
+                    dist = np.hypot(pred_cx - cx_det, pred_cy - cy_det)
                 bin_diff = min(abs(projectile.bin_id - bin_id), self.num_bins - abs(projectile.bin_id - bin_id))
 
                 if dist < 30 and bin_diff <= 2:
@@ -477,7 +494,7 @@ class ProjectileTracker:
         return mask.astype(bool)
     
     def __track_projectiles__(self):
-        """Main loop to read frames, compute flow, subtract background, detect projectiles, etc."""
+        """Main loop to read frames, compute flow, subtract background, detect projectiles and track projectiles."""
         while self.cap.isOpened():
             # Skip N frames if needed
             for _ in range(self.N_FRAMES_SKIP + 1):
@@ -490,17 +507,17 @@ class ProjectileTracker:
             frame_diff = cv.absdiff(frame, self.prev_raw)
             max_pixel_diff = np.max(frame_diff)
             
-            if self.INSPECT_FRAMES:
+            if self.debugging:
                 print(f'Diff between current and prior frame: {np.sum(frame_diff)}, Max pixel diff: {max_pixel_diff}')
             self.pixel_diff_log.append(max_pixel_diff)
             if len(self.pixel_diff_log) > 10:
                 self.pixel_diff_log.pop(0)
 
-            if self.INSPECT_FRAMES:
+            if self.debugging:
                 print(max_pixel_diff, np.average(self.pixel_diff_log))
             #if max_pixel_diff < np.average(self.pixel_diff_log) / 2:
             if max_pixel_diff < 60:
-                if self.INSPECT_FRAMES:
+                if self.debugging:
                     print('skipped_frame')
                 continue
 
@@ -582,20 +599,32 @@ class ProjectileTracker:
             self.prev_gray = gray
             self.prev_raw = raw_frame
 
-            # Handle "inspect frames" or "press Q to quit"
+            key = cv.waitKey(0 if self.INSPECT_FRAMES else 1) & 0xFF
+
+            # Toggle inspect/stepping mode
+            if key == ord('s'):
+                self.INSPECT_FRAMES = not self.INSPECT_FRAMES
+                print("Stepping mode:", "ON" if self.INSPECT_FRAMES else "OFF")
+
+            # Handle quitting
+            if key == ord('q') or key == 27:  # 27 = Esc
+                self.__cleanup__()
+                break
+
+            # If in inspect/stepping mode: wait for Enter
             if self.INSPECT_FRAMES:
-                print("Press Enter to see next frame (or Esc to exit)...")
+                print("Press Enter to continue, or Esc to exit...")
                 while True:
                     key = cv.waitKey(0) & 0xFF
                     if key == 13:  # Enter
                         break
-                    elif key == 27:  # Escape
+                    elif key == 27 or key == ord('q'):
                         self.__cleanup__()
                         exit()
-            else:
-                if cv.waitKey(1) & 0xFF == ord('q'):
-                    self.__cleanup__()
-                    break
+                    elif key == ord('s'):
+                        self.INSPECT_FRAMES = False
+                        print("Stepping mode: OFF")
+                        break
 
         self.__cleanup__()
         
@@ -701,7 +730,8 @@ class ProjectileTracker:
         
         
 if __name__ == '__main__':
-    tracker = ProjectileTracker(debugging=False)
-    video_path = "120fps_data/different_projectiles_and_moving.mp4"
+    tracker = ProjectileTracker(debugging=True)
+    #video_path = "120fps_data/different_projectiles_and_moving.mp4"
+    video_path = "120fps_data/movement_green.mp4"
     #video_path = "120fps_data/standing.mp4"
     tracker.run_tracker(video_path)

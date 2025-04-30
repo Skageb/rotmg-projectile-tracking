@@ -3,9 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-skage_sandbox/data/*
-skage_sandbox/results/*
-skage_sandbox/optical_flow/*
+projectile_tracking/data/*
+projectile_tracking/results/*
+projectile_tracking/optical_flow/*
 
 # C extensions
 *.so
