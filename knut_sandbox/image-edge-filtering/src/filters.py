@@ -46,8 +46,8 @@ def apply_filter_1(image, param1, param2):
     """
     # Convert to grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    lower_threshold = param1 * 50      # Example adjustment
-    upper_threshold = param2 * 100
+    lower_threshold = param1 * 250      # Example adjustment
+    upper_threshold = param2 * 255
     edges = cv2.Canny(gray, lower_threshold, upper_threshold)
     # Convert single channel edge image back to BGR for consistency
     return cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
