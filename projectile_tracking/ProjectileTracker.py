@@ -2,7 +2,7 @@ import cv2 as cv
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-
+from time import time
 
 
 def gaussian_downsize(frame):
@@ -16,12 +16,12 @@ def gaussian_downsize(frame):
 
 class Projectile:
     def __init__(self, bbox, bin_id, flow_vector):
-        self.id = None  #Only assign id's to confirmed projectiles.
+        self.id = None  
         self.bbox = bbox  # (x1, y1, x2, y2)
         self.bin_id = bin_id  # motion direction bin
         self.flow_vector = flow_vector  # (vx, vy)
         self.age = 0    #Number of frames survived.
-        self.missed = 0
+        self.missed = 0   #Number of frames not detected in
         self.confirmed = False
         
 
@@ -33,7 +33,7 @@ class ProjectileTracker:
         self.OPTICAL_FLOW_WINDOW = debugging
         self.debugging = debugging
 
-        self.INSPECT_FRAMES = True
+        self.INSPECT_FRAMES = False
 
         self.N_FRAMES_SKIP = 0
 
@@ -92,7 +92,8 @@ class ProjectileTracker:
             
             result_path = f'{self.result_folder}/{video_path.split('/')[-1].split('.')[0]}.mp4'
             result_path = self.__get_versioned_filename__(result_path)
-            self.out_result = cv.VideoWriter(result_path, fourcc, 30.0,
+            print('Storing result in:', result_path)
+            self.out_result = cv.VideoWriter(result_path, fourcc, 60.0,
                                               (self.frame_width, self.frame_height))
             
             if not self.out_result.isOpened():
@@ -131,13 +132,13 @@ class ProjectileTracker:
         if OpticalFlow_Args and (set(OpticalFlow_Args.keys()) & required_args) == set(OpticalFlow_Args.keys()):
             flow = cv.calcOpticalFlowFarneback(
                 prev_gray, gray,
-                flow=None,          # no initial flow
+                flow=None,          
                 **OpticalFlow_Args
             )
         if not flow:
             flow = cv.calcOpticalFlowFarneback(
                 prev_gray, gray,
-                flow=None,          # no initial flow
+                flow=None,          
                 pyr_scale=0.8, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0
             )
         return flow
@@ -146,7 +147,7 @@ class ProjectileTracker:
 
     def __pixel_clustering__(
         self, residual_flow_x, residual_flow_y, frame_for_drawing,
-        mag_threshold=2.0, size_threshold=10, num_bins=36
+        mag_threshold=2.0, size_threshold=30, num_bins=36
     ):
         """
         Returns a list of tuples: (bin_id, (min_x, min_y, max_x, max_y)).
@@ -292,7 +293,7 @@ class ProjectileTracker:
 
         bg_magnitude = np.mean(sorted(block_maxes))
         #bg_magnitude_upper_thresh = bg_magnitude + 0.5
-        print(f'Background_motion:   Mean {bg_magnitude}, block_maxes: {block_maxes} ')
+        #print(f'Background_motion:   Mean {bg_magnitude}, block_maxes: {block_maxes} ')
         return  bg_magnitude#, bg_magnitude_upper_thresh
 
     
@@ -303,7 +304,7 @@ class ProjectileTracker:
         """
         
 
-        # 1) Convert flow to magnitude and angle (in degrees)
+        # Convert flow to magnitude and angle (in degrees)
         magnitude, angle = cv.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=True)
         
         if np.mean(magnitude) <= 1:
@@ -317,11 +318,11 @@ class ProjectileTracker:
             self.background_movement = True
         #print(np.unique_counts(magnitude.astype(np.int16)))
 
-        # 2) Create overlapping bins (every 5 degrees)
+        # Create overlapping bins (every 5 degrees)
         angle_shifted = (angle + 5) % 360  # Shift by half-bin to center the bins
         angle_bin = (angle_shifted // 10).astype(np.uint8)  # 0 to 71 bins
 
-        # 3) Find dominant angle bin
+        # Find dominant angle bin
         dominant_bin = np.bincount(angle_bin.flatten()).argmax()
         dominant_angle_deg = dominant_bin * 10  # Central angle of dominant bin
         
@@ -335,26 +336,24 @@ class ProjectileTracker:
         self.background_vx = background_mag * np.cos(dominant_angle_rad)
         self.background_vy = background_mag * np.sin(dominant_angle_rad)
     
-        # 4) Calculate angular deviation
+        # Calculate angular deviation
         angle_deviation = np.abs(angle - dominant_angle_deg)
         angle_deviation = np.minimum(angle_deviation, 360 - angle_deviation)
 
-        # 5) Find background pixels
-        background_mask = (angle_deviation <= 10)  # ±5 degrees window
+        # Find background pixels
+        background_mask = (angle_deviation <= 10)  
 
-        # 6) Background magnitude profile
+        # Background magnitude profile
         background_magnitudes = magnitude[background_mask]  
         
-        print(np.unique_counts(background_magnitudes.astype(np.uint16)))
+        #print(np.unique_counts(background_magnitudes.astype(np.uint16)))
         if len(background_magnitudes) == 0:
             background_mag_threshold = 0.0
         else:
             background_mag_threshold = np.percentile(background_magnitudes, 90)
 
-        # 7) Suppression
         suppress_mask = (background_mask) & (magnitude <= background_mag_threshold * 1.5)
-
-        # 8) Subtract suppressed flow
+        
         residual_flow_x = flow[..., 0].copy()
         residual_flow_y = flow[..., 1].copy()
 
@@ -412,7 +411,7 @@ class ProjectileTracker:
                     dist = np.hypot(pred_cx - cx_det, pred_cy - cy_det)
                 bin_diff = min(abs(projectile.bin_id - bin_id), self.num_bins - abs(projectile.bin_id - bin_id))
 
-                if dist < 30 and bin_diff <= 2:
+                if dist < 40 and bin_diff <= 1:
                     if dist < best_distance:
                         best_distance = dist
                         best_projectile:Projectile = projectile
@@ -467,10 +466,9 @@ class ProjectileTracker:
         mask = np.ones((height, width), dtype=np.uint8)
 
         # Size of the ignored region
-        square_length = int(height * mask_size_ratio)  # Equal width and height
+        square_length = int(height * mask_size_ratio) 
         half_length = square_length // 2
 
-        # Default anchor point is frame center
         if anchor_point is None:
             cx, cy = width // 2, height // 2
         else:
@@ -552,7 +550,7 @@ class ProjectileTracker:
                 residual_flow_x, residual_flow_y,
                 frame_for_drawing=frame,  # draw boxes on the current downscaled color frame
                 mag_threshold=0.5,
-                size_threshold=10,
+                size_threshold=20,
                 num_bins=36
             )
 
@@ -684,12 +682,12 @@ class ProjectileTracker:
             
 
     def __write_results__(self, frame):
-        print('writing called')
+        #print('writing called')
         if self.out_result is not None and self.out_result.isOpened():
             if (frame.shape[1], frame.shape[0]) != (self.frame_width, self.frame_height):
                 frame = cv.resize(frame, (self.frame_width, self.frame_height), interpolation=cv.INTER_LINEAR)
             self.out_result.write(frame)
-            print('written')
+            #print('written')
             
             
             
@@ -730,8 +728,13 @@ class ProjectileTracker:
         
         
 if __name__ == '__main__':
-    tracker = ProjectileTracker(debugging=True)
+    tracker = ProjectileTracker(debugging=False)
     #video_path = "120fps_data/different_projectiles_and_moving.mp4"
     video_path = "120fps_data/movement_green.mp4"
     #video_path = "120fps_data/standing.mp4"
+    #video_path = "120fps_data/2025-03-26 10-34-28.mp4"
+    start_time = time()
     tracker.run_tracker(video_path)
+    end_time = time()
+    print(f'Total run time for this video is {end_time-start_time}')
+    
