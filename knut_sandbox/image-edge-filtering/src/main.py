@@ -18,8 +18,8 @@ def main():
     image = load_image(image_path)
 
     filters = [
-        (apply_filter_1, {'param1': 1, 'param2': 2}),
-        (apply_filter_2, {'param1': 3}),
+        (apply_filter_2, {'param1': 1, 'param2': 1}),
+        (apply_filter_2, {'param1': 1}),
         (apply_filter_3, {'param1': 3, 'param2': 5, 'param3': 0}),
     ]
     
